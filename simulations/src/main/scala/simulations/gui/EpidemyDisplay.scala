@@ -46,7 +46,7 @@ object EpidemyDisplay extends EpidemySimulator with App {
   def hasStep: Boolean = !agenda.isEmpty
 
   private object GraphicConfig {
-    val delay = 200
+    val delay = 30
     val personSize = 8
     val interPersonSize = 4
     val roomBorderSize = 4
