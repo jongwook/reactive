@@ -1,6 +1,6 @@
 package nodescala
 
-import com.sun.net.httpserver._
+import scala.language.postfixOps
 import scala.concurrent._
 import scala.concurrent.duration._
 import ExecutionContext.Implicits.global
@@ -10,6 +10,7 @@ import scala.collection.JavaConversions._
 import java.util.concurrent.{Executor, ThreadPoolExecutor, TimeUnit, LinkedBlockingQueue}
 import com.sun.net.httpserver.{HttpExchange, HttpHandler, HttpServer}
 import java.net.InetSocketAddress
+import scala.util.Try
 
 /** Contains utilities common to the NodeScala© framework.
  */
@@ -27,9 +28,16 @@ trait NodeScala {
    *
    *  @param exchange     the exchange used to write the response back
    *  @param token        the cancellation token for
-   *  @param body         the response to write back
+   *  @param response     the response to write back
    */
-  private def respond(exchange: Exchange, token: CancellationToken, response: Response): Unit = ???
+  private def respond(exchange: Exchange, token: CancellationToken, response: Response): Unit = {
+    for ( data <- response ) {
+      if ( token.nonCancelled ) {
+        exchange.write(data)
+      }
+    }
+    exchange.close()
+  }
 
   /** A server:
    *  1) creates and starts an http listener
@@ -41,7 +49,29 @@ trait NodeScala {
    *  @param handler        a function mapping a request to a response
    *  @return               a subscription that can stop the server and all its asynchronous operations *entirely*.
    */
-  def start(relativePath: String)(handler: Request => Response): Subscription = ???
+  def start(relativePath: String)(handler: Request => Response): Subscription = {
+    val listener = createListener(relativePath)
+    val subscription = listener.start()
+    val source = CancellationTokenSource()
+    val token = source.cancellationToken
+
+    Future.run() { token =>
+      Future {
+        while (token.nonCancelled) {
+          try {
+            val (request, exchange) = Await.result(listener.nextRequest(), 1 second)
+            async {
+              respond(exchange, token, handler(request))
+            }
+          } catch {
+            case t: TimeoutException => // loop
+          }
+        }
+      }
+    }
+
+    Subscription(subscription, source)
+  }
 
 }
 
@@ -76,7 +106,7 @@ object NodeScala {
 
   object Exchange {
     def apply(exchange: HttpExchange) = new Exchange {
-      val os = exchange.getResponseBody()
+      val os = exchange.getResponseBody
       exchange.sendResponseHeaders(200, 0L)
 
       def write(s: String) = os.write(s.getBytes)
@@ -111,7 +141,14 @@ object NodeScala {
      *  @param relativePath    the relative path on which we want to listen to requests
      *  @return                the promise holding the pair of a request and an exchange object
      */
-    def nextRequest(): Future[(Request, Exchange)] = ???
+    def nextRequest(): Future[(Request, Exchange)] = {
+      val promise = Promise[(Request, Exchange)]()
+      createContext(exchange => {
+        promise.complete(Try(exchange.request, exchange))
+        removeContext()
+      })
+      promise.future
+    }
   }
 
   object Listener {

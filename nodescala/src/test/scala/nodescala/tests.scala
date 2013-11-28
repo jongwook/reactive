@@ -34,6 +34,47 @@ class NodeScalaSuite extends FunSuite {
     }
   }
 
+  test("Future.all will aggregate results") {
+    val futures = List(Future.always(1), Future.always(2), Future.always(3))
+
+    val result = Await.result(Future.all(futures), 1 second).toSet
+
+    assert(result == Set(1, 2, 3))
+  }
+
+
+  test("Future.all will fail if one of input fails") {
+    val futures = List(Future.always(1), Future.always(2), Future.never[Int])
+
+    try {
+      Await.result(Future.all(futures), 1 second)
+      assert(false)
+    } catch {
+      case t: TimeoutException => // ok!
+    }
+  }
+
+  test("Future.any will contain one of results") {
+    val futures = List(Future.always(1), Future.always(2), Future.always(3))
+
+    val result = Await.result(Future.any(futures), 1 second)
+
+    assert(Set(1, 2, 3) contains result)
+  }
+
+  test("Future.delay will be delayed <=") {
+    Await.result(Future.delay(1 second), 2 seconds)
+  }
+
+  test("Future.delay will be delayed >=") {
+    try {
+      Await.result(Future.delay(2 second), 1 seconds)
+      assert(false)
+    } catch {
+      case t: TimeoutException => // ok!
+    }
+  }
+
   test("CancellationTokenSource should allow stopping the computation") {
     val cts = CancellationTokenSource()
     val ct = cts.cancellationToken
