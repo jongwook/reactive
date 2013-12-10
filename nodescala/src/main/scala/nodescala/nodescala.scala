@@ -59,14 +59,14 @@ trait NodeScala {
       Future {
         while (token.nonCancelled) {
           try {
-            val (request, exchange) = Await.result(listener.nextRequest(), 1 second)
-            async {
-              respond(exchange, token, handler(request))
-            }
+            val (request, exchange) = Await.result(listener.nextRequest(), 10 second)
+            respond(exchange, token, handler(request))
           } catch {
             case t: TimeoutException => // loop
           }
         }
+        println("Stopping HTTP listener")
+        listener.removeContext()
       }
     }
 
