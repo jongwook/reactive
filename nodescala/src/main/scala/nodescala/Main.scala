@@ -32,7 +32,7 @@ object Main {
     // 3. create a future that completes after 20 seconds
     //    and continues with a `"Server timeout!"` message
     val timeOut: Future[String] = {
-      Future.delay(2000 seconds).continue(_ => "Server timeout!")
+      Future.delay(20 seconds).continue(_ => "Server timeout!")
     }
 
     // TO IMPLEMENT
