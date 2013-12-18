@@ -70,12 +70,38 @@ class BinaryTreeSet extends Actor {
   // optional
   def receive = normal
 
+  def fake(op: Operation) =
+    op match {
+      case Insert(req, id, el) => Insert(self, id, el)
+      case Remove(req, id, el) => Remove(self, id, el)
+      case Contains(req, id, el) => Contains(self, id, el)
+    }
+
   // optional
   /** Accepts `Operation` and `GC` messages. */
   val normal: Receive = {
     case op: Operation =>
-      //println("passing operation " + op)
-      root ! op
+      //println("appending " + op)
+      //println("QUEUE: " + pendingQueue.map(_.id).take(10).mkString(",") + "...[" + pendingQueue.size + "]")
+      if (pendingQueue.isEmpty) {
+        //println("first-sending ( " + op.id + " ) " + op)
+        //println("QUEUE: " + pendingQueue.map(_.id).take(10).mkString(",") + "...[" + pendingQueue.size + "]")
+        root ! fake(op)
+      }
+      pendingQueue = pendingQueue :+ op
+    case reply: OperationReply =>
+      val (op, queue) = pendingQueue.dequeue
+      pendingQueue = queue
+      //println("replying " + reply)
+      //println("QUEUE: " + pendingQueue.map(_.id).take(10).mkString(",") + "...[" + pendingQueue.size + "]")
+      op.requester ! reply
+
+      if (!pendingQueue.isEmpty) {
+        val next = pendingQueue.front
+        //println("queue-sending ( " + next.id + " ) " + next)
+        //println("QUEUE: " + pendingQueue.map(_.id).take(10).mkString(",") + "...[" + pendingQueue.size + "]")
+        root ! fake(next)
+      }
     case GC =>
       //println("passing operation " + GC)
       val newRoot = createRoot
@@ -97,8 +123,12 @@ class BinaryTreeSet extends Actor {
       root ! PoisonPill
       root = newRoot
       //println("GC finished: rescheduled " + pendingQueue.size + " pending operations : " + pendingQueue)
-      pendingQueue.foreach(context.self ! _)
-      pendingQueue = Queue.empty[Operation]
+      if (!pendingQueue.isEmpty) {
+        val next = pendingQueue.front
+        //println("after-gc-sending ( " + next.id + " ) " + next)
+        //println("QUEUE: " + pendingQueue.map(_.id).take(10).mkString(",") + "...[" + pendingQueue.size + "]")
+        root ! fake(next)
+      }
   }
 }
 
