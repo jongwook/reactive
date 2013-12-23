@@ -39,6 +39,12 @@ object BinaryTreeSet {
   /** Request to perform garbage collection*/
   case object GC
 
+  /** Request to GC that migrates all children nodes to a new root node */
+  case class GCRequest(root: ActorRef)
+
+  /** Response that GC has completed and all children has migrated to the new root node */
+  case object GCFinished
+
   /** Holds the answer to the Contains request with identifier `id`.
     * `result` is true if and only if the element is present in the tree.
     */
@@ -54,7 +60,7 @@ class BinaryTreeSet extends Actor {
   import BinaryTreeSet._
   import BinaryTreeNode._
 
-  def createRoot: ActorRef = context.actorOf(BinaryTreeNode.props(0, initiallyRemoved = true))
+  def createRoot: ActorRef = context.actorOf(BinaryTreeNode.props(-1, initiallyRemoved = true))
 
   var root = createRoot
 
@@ -64,13 +70,43 @@ class BinaryTreeSet extends Actor {
   // optional
   def receive = normal
 
+  def fake(op: Operation) =
+    op match {
+      case Insert(req, id, el) => Insert(self, id, el)
+      case Remove(req, id, el) => Remove(self, id, el)
+      case Contains(req, id, el) => Contains(self, id, el)
+    }
+
   // optional
   /** Accepts `Operation` and `GC` messages. */
   val normal: Receive = {
-    case Insert(requester, id, elem) =>
-    case Contains(requester, id, elem) =>
-    case Remove(requester, id, elem) =>
+    case op: Operation =>
+      //println("appending " + op)
+      //println("QUEUE: " + pendingQueue.map(_.id).take(10).mkString(",") + "...[" + pendingQueue.size + "]")
+      if (pendingQueue.isEmpty) {
+        //println("first-sending ( " + op.id + " ) " + op)
+        //println("QUEUE: " + pendingQueue.map(_.id).take(10).mkString(",") + "...[" + pendingQueue.size + "]")
+        root ! fake(op)
+      }
+      pendingQueue = pendingQueue :+ op
+    case reply: OperationReply =>
+      val (op, queue) = pendingQueue.dequeue
+      pendingQueue = queue
+      //println("replying " + reply)
+      //println("QUEUE: " + pendingQueue.map(_.id).take(10).mkString(",") + "...[" + pendingQueue.size + "]")
+      op.requester ! reply
+
+      if (!pendingQueue.isEmpty) {
+        val next = pendingQueue.front
+        //println("queue-sending ( " + next.id + " ) " + next)
+        //println("QUEUE: " + pendingQueue.map(_.id).take(10).mkString(",") + "...[" + pendingQueue.size + "]")
+        root ! fake(next)
+      }
     case GC =>
+      //println("passing operation " + GC)
+      val newRoot = createRoot
+      root ! GCRequest(newRoot)
+      context.become(garbageCollecting(newRoot))
   }
 
   // optional
@@ -78,8 +114,22 @@ class BinaryTreeSet extends Actor {
     * `newRoot` is the root of the new binary tree where we want to copy
     * all non-removed elements into.
     */
-  def garbageCollecting(newRoot: ActorRef): Receive = ???
-
+  def garbageCollecting(newRoot: ActorRef): Receive = {
+    case op: Operation =>
+      pendingQueue = pendingQueue :+ op
+      //println("added pending operation while in GC:" + op)
+    case GCFinished =>
+      context.unbecome()
+      root ! PoisonPill
+      root = newRoot
+      //println("GC finished: rescheduled " + pendingQueue.size + " pending operations : " + pendingQueue)
+      if (!pendingQueue.isEmpty) {
+        val next = pendingQueue.front
+        //println("after-gc-sending ( " + next.id + " ) " + next)
+        //println("QUEUE: " + pendingQueue.map(_.id).take(10).mkString(",") + "...[" + pendingQueue.size + "]")
+        root ! fake(next)
+      }
+  }
 }
 
 object BinaryTreeNode {
@@ -104,9 +154,79 @@ class BinaryTreeNode(val elem: Int, initiallyRemoved: Boolean) extends Actor {
   // optional
   def receive = normal
 
+  // remaining GCFinished replies to await
+  var remaining = 0
+
   // optional
   /** Handles `Operation` messages and `CopyTo` requests. */
-  val normal: Receive = { case _ => ??? }
+  val normal: Receive = {
+    case Insert(requester, id, el) =>
+      if (el == elem) {
+        removed = false
+        requester ! OperationFinished(id)
+      } else {
+        val pos = if (el > elem) Right else Left
+        subtrees.get(pos) match {
+          case Some(node) =>
+            node ! Insert(requester, id, el)
+          case None =>
+            subtrees = subtrees.updated(pos, context.actorOf(props(el, initiallyRemoved = false)))
+            requester ! OperationFinished(id)
+        }
+      }
+    case Contains(requester, id, el) =>
+      if (el == elem) {
+        requester ! ContainsResult(id, !removed)
+      } else {
+        val pos = if (el > elem) Right else Left
+        subtrees.get(pos) match {
+          case Some(node) => node ! Contains(requester, id, el)
+          case None => requester ! ContainsResult(id, false)
+        }
+      }
+    case Remove(requester, id, el) =>
+      if (el == elem) {
+        removed = true
+        requester ! OperationFinished(id)
+      } else {
+        val pos = if (el > elem) Right else Left
+        subtrees.get(pos) match {
+          case Some(node) => node ! Remove(requester, id, el)
+          case None => requester ! OperationFinished(id)
+        }
+      }
+    case GCRequest(root: ActorRef) =>
+      if (!removed) {
+        //println(elem + ": sending insert to the new root")
+        root ! Insert(context.self, 0, elem)
+      }
+      remaining = 0
+      subtrees.get(Left) match {
+        case Some(node) =>
+          //println(elem + ": sending GCRequest to left")
+          node ! GCRequest(root)
+          remaining += 1
+        case None =>
+      }
+      subtrees.get(Right) match {
+        case Some(node) =>
+          //println(elem + ": sending GCRequest to right")
+          node ! GCRequest(root)
+          remaining += 1
+        case None =>
+      }
+      if (remaining == 0) {
+        sender ! GCFinished
+      }
+    case GCFinished =>
+      remaining -= 1
+      //println(elem + ": received GCFinished - remaining = " + remaining)
+      if (remaining == 0) {
+        context.parent ! GCFinished
+      }
+
+
+  }
 
   // optional
   /** `expected` is the set of ActorRefs whose replies we are waiting for,

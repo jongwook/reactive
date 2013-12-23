@@ -6,5 +6,6 @@
 */.project
 */lib_managed
 */submission
-
+.DS_Store
+*.iml
 
