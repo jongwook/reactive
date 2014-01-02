@@ -40,7 +40,7 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor {
    * The contents of this actor is just a suggestion, you can implement it in any way you like.
    */
   arbiter ! Join
-  
+  System.out.println(f"Replica $self created")
   var kv = Map.empty[String, String]
   // a map from secondary replicas to replicators
   var secondaries = Map.empty[ActorRef, ActorRef]
@@ -54,19 +54,43 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor {
     case JoinedSecondary => context.become(replica)
   }
 
-  /* TODO Behavior for  the leader role. */
   val leader: Receive = {
     case Insert(key, value, id) =>
       kv = kv.updated(key, value)
       sender ! OperationAck(id)
+      replicators.foreach(_ ! Replicate(key, Some(value), id))
     case Remove(key, id) =>
       kv = kv - key
       sender ! OperationAck(id)
+      replicators.foreach(_ ! Replicate(key, None, id))
     case Get(key, id) =>
       sender ! GetResult(key, kv.get(key), id)
+    case Replicas(replicas) =>
+      val toRemove = secondaries.keySet.diff(replicas)
+      val toAdd = replicas.diff(secondaries.keySet)
+
+      System.out.println(f"Replicas : toRemove $toRemove, toAdd $toAdd")
+
+      toRemove.foreach(replica => {
+        secondaries.get(replica) match {
+          case Some(replicator) =>
+            replicator ! PoisonPill
+            secondaries = secondaries - replica
+            replicators = replicators - replicator
+            System.out.println(f"removed $replica and stopped its replicator $replicator")
+          case None =>
+            System.err.println(f"replicator of $replica not found")
+        }
+      })
+
+      toAdd.foreach(replica => {
+        val replicator = context.actorOf(Replicator.props(replica))
+        secondaries = secondaries.updated(replica, replicator)
+        replicators = replicators + replicator
+        System.out.println(f"added replicator $replicator to replica $replica")
+      })
   }
 
-  /* TODO Behavior for the replica role. */
   val replica: Receive = {
     case Replicate(key, valueOption, id) =>
       valueOption match {

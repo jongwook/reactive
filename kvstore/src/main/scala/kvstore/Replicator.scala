@@ -4,6 +4,7 @@ import akka.actor.Props
 import akka.actor.Actor
 import akka.actor.ActorRef
 import scala.concurrent.duration._
+import  scala.language.postfixOps
 
 object Replicator {
   case class Replicate(key: String, valueOption: Option[String], id: Long)
@@ -35,10 +36,24 @@ class Replicator(val replica: ActorRef) extends Actor {
     _seqCounter += 1
     ret
   }
-  
-  /* TODO Behavior for the Replicator. */
+
+  context.system.scheduler.schedule(100 millis, 100 millis) {
+    pending.foreach(replica ! _)
+  }
+
   def receive: Receive = {
-    case _ =>
+    case Replicate(key, valueOption, id) =>
+      val seq = nextSeq
+      acks = acks.updated(seq, (sender, Replicate(key, valueOption, id)))
+      pending = pending :+ Snapshot(key, valueOption, seq)
+    case SnapshotAck(key, seq) =>
+      pending = pending.filterNot(_.seq == seq)
+      acks.get(seq) match {
+        case Some((actor, replicate)) =>
+          actor ! Replicated(key, replicate.id)
+        case None =>
+          System.err.println(f"No recipient actor for seq $seq found")
+      }
   }
 
 }
