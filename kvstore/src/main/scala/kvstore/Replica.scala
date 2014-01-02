@@ -1,17 +1,10 @@
 package kvstore
 
-import akka.actor.{ OneForOneStrategy, Props, ActorRef, Actor }
+import akka.actor.{ Props, ActorRef, Actor }
 import kvstore.Arbiter._
-import scala.collection.immutable.Queue
-import akka.actor.SupervisorStrategy.Restart
-import scala.annotation.tailrec
-import akka.pattern.{ ask, pipe }
-import akka.actor.Terminated
 import scala.concurrent.duration._
 import akka.actor.PoisonPill
-import akka.actor.OneForOneStrategy
-import akka.actor.SupervisorStrategy
-import akka.util.Timeout
+import scala.language.postfixOps
 
 object Replica {
   sealed trait Operation {
@@ -47,22 +40,49 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor {
   // the current set of replicators
   var replicators = Set.empty[ActorRef]
 
+  var persistence = context.actorOf(persistenceProps)
+
   var lastSeq: Long = -1
+
+  var pending = Map.empty[Long, (ActorRef, Long, Persist, Object)]
 
   def receive = {
     case JoinedPrimary   => context.become(leader)
     case JoinedSecondary => context.become(replica)
   }
 
+  context.system.scheduler.schedule(100 millis, 100 millis) {
+    val now = System.currentTimeMillis();
+    pending.foreach({
+      case (id, (actor, timestamp, persist, reply)) =>
+        if (now - timestamp > 1000) {
+          actor ! OperationFailed(id)
+          pending = pending - id
+        } else {
+          persistence ! persist
+        }
+    })
+  }
+
   val leader: Receive = {
     case Insert(key, value, id) =>
       kv = kv.updated(key, value)
-      sender ! OperationAck(id)
+      val persist = Persist(key, Some(value), id)
+      pending = pending.updated(id, (sender, System.currentTimeMillis(), persist, OperationAck(id)))
       replicators.foreach(_ ! Replicate(key, Some(value), id))
     case Remove(key, id) =>
       kv = kv - key
-      sender ! OperationAck(id)
+      val persist = Persist(key, None, id)
+      pending = pending.updated(id, (sender, System.currentTimeMillis(), persist, OperationAck(id)))
       replicators.foreach(_ ! Replicate(key, None, id))
+    case Persisted(key, id) =>
+      pending.get(id) match {
+        case Some((actor, timestamp, persist, reply)) =>
+          pending = pending - id
+          actor ! reply
+        case None =>
+          System.err.println(f"operation $id is not pending")
+      }
     case Get(key, id) =>
       sender ! GetResult(key, kv.get(key), id)
     case Replicas(replicas) =>
@@ -99,7 +119,8 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor {
         case None =>
           kv = kv - key
       }
-      sender ! Replicated(key, id)
+      val persist = Persist(key, valueOption, id)
+      pending = pending.updated(id, (sender, System.currentTimeMillis(), persist, Replicated(key, id)))
     case Snapshot(key, valueOption, seq) =>
       if (seq == lastSeq + 1) {
         valueOption match {
@@ -111,7 +132,16 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor {
         lastSeq = seq
       }
       if (seq <= lastSeq) {
-        sender ! SnapshotAck(key, seq)
+        val persist = Persist(key, valueOption, -seq)
+        pending = pending.updated(-seq, (sender, System.currentTimeMillis(), persist, SnapshotAck(key, seq)))
+      }
+    case Persisted(key, id) =>
+      pending.get(id) match {
+        case Some((actor, timestamp, persist, reply)) =>
+          pending = pending - id
+          actor ! reply
+        case None =>
+          System.err.println(f"operation $id is not pending")
       }
     case Get(key, id) =>
       sender ! GetResult(key, kv.get(key), id)
